@@ -32,6 +32,12 @@
       font-size: 16px;
       line-height: 1.5;
     }
+    .actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      justify-content: center;
+    }
     a {
       display: inline-flex;
       align-items: center;
@@ -45,13 +51,21 @@
       text-decoration: none;
       box-shadow: 0 4px 0 #c95528;
     }
+    a.secondary {
+      background: #fff;
+      color: #6f5235;
+      box-shadow: inset 0 0 0 2px #f0d3a6;
+    }
   </style>
 </head>
 <body>
   <main>
     <h1>Gamia AI Games</h1>
     <p>Small browser games built for quick play.</p>
-    <a href="./tower_game/">Play Tower Building</a>
+    <div class="actions">
+      <a href="./tower_game/">Play Tower Building</a>
+      <a class="secondary" href="./privacy.html">Privacy Policy</a>
+    </div>
   </main>
 </body>
 </html>
