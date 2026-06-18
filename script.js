@@ -2174,25 +2174,10 @@ document.addEventListener('DOMContentLoaded', () => {
             '';
         const templateId = normalizeTemplateId(rawTemplateId);
         const mode = String(rawDecision.generationMode || rawDecision.mode || rawDecision.route || '').trim().toLowerCase();
-        const confidence = Math.max(0, Math.min(1, Number(rawDecision.confidence) || (templateId ? 0.86 : 0.72)));
-        if (templateId && templateId !== 'ai_direct') {
-            const status = getTemplateStatus(templateId);
-            if (!status || status.published === false || status.compileReady !== true) return null;
-            return {
-                canAutoGenerate: true,
-                templateId: status.id || status.templateId || templateId,
-                templateLabel: status.label || status.gameType || templateId,
-                templateGenre: status.type || status.gameType || spec.gameType || 'custom-html5-game',
-                generationMode: 'template_assisted',
-                normalizedGameType: spec.gameType || status.gameType || 'Custom HTML5 game',
-                locked: false,
-                confidence,
-                reason: rawDecision.reason || rawDecision.matchReason || 'Selected by the current AI analyze response.',
-                source: 'ai_analyze',
-                candidates: [status]
-            };
-        }
-        if (mode === 'template_assisted' || mode === 'template_compile' || mode === 'template') return null;
+        const confidence = Math.max(0, Math.min(1, Number(rawDecision.confidence) || 0.86));
+        const selectedTemplate = templateId && templateId !== 'ai_direct'
+            ? getTemplateStatus(templateId)
+            : null;
         return {
             canAutoGenerate: true,
             templateId: 'ai_direct',
@@ -2202,9 +2187,17 @@ document.addEventListener('DOMContentLoaded', () => {
             normalizedGameType: spec.gameType || 'Custom HTML5 game',
             locked: false,
             confidence,
-            reason: rawDecision.reason || 'The current AI analyze response did not select a compile-ready backend template.',
+            reason: rawDecision.reason || (mode === 'template_assisted' || mode === 'template_compile' || mode === 'template'
+                ? 'AI analyze suggested a template, but this frontend build is locked to AI Direct full-game generation.'
+                : 'The current AI analyze response will continue through AI Direct full-game generation.'),
             source: 'ai_analyze',
-            candidates: []
+            candidates: [],
+            templateSuggestion: selectedTemplate
+                ? {
+                    templateId: selectedTemplate.id || selectedTemplate.templateId || templateId,
+                    templateLabel: selectedTemplate.label || selectedTemplate.gameType || templateId
+                }
+                : null
         };
     }
 
@@ -3688,7 +3681,7 @@ Use this shape:
   },
   "background": string|null,
   "missingFields": string[],
-  "generationDecision": {"generationMode": "ai_direct|template_assisted", "templateId": string|null, "confidence": number, "reason": string},
+  "generationDecision": {"generationMode": "ai_direct", "templateId": null, "confidence": number, "reason": string},
   "fieldSuggestions": {
     "type": {"options": string[], "recommendedIndex": number|null, "recommendedValue": string|null, "reason": string},
     "style": {"options": string[], "recommendedIndex": number|null, "recommendedValue": string|null, "reason": string},
@@ -3711,7 +3704,7 @@ AI direct generation:
 - Treat "no 3D", "without 3D", "avoid 3D", "不要 3D", and "不需要 3D" as a 2D generation constraint, not as a 3D request or 3D art style.
 - If the user explicitly asks to generate a 3D game, 3D world, 3D model game, or Three.js project, set capability.supported=false with blockedReasons including "3D generation is not available yet".
 - Preserve the requested gameType as ordinary GameSpec text. It is an input hint, not a gate.
-- generationDecision is optional. If you select template_assisted, templateId must exactly match one templateId from availableGameTemplates. If no listed template clearly fits, return generationMode="ai_direct" and templateId=null.
+- generationDecision is optional. If returned, it must use generationMode="ai_direct" and templateId=null. Do not select template_assisted or any backend template route in this product build.
 - fieldSuggestions is optional. Only include a Recommended candidate when it is genuinely based on the user's prompt and extracted GameSpec.
 - Use these fieldSuggestions keys exactly: type, style, setting, coreGameplay, playerGoal, mainChallenge, progressionSystem, difficultyLevel.
 - If unsure for a field, set recommendedIndex to null and recommendedValue to null for that field.
@@ -3731,7 +3724,7 @@ Treat genre conventions as suggested, not confirmed, unless the user explicitly 
                             progression: PROGRESSION_OPTIONS.map(item => item.value),
                             difficulty: DIFFICULTY_OPTIONS.map(item => item.value)
                         },
-                        availableGameTemplates: getAvailableGameTemplatesForAI().filter(item => item && item.published !== false && item.compileReady === true),
+                        availableGameTemplates: [],
                         requestContext: buildAIRequestContext(prompt)
                     })
                 }
@@ -4988,7 +4981,7 @@ Treat genre conventions as suggested, not confirmed, unless the user explicitly 
                 .flatMap(turn => turn.attachments || [])
                 .slice(-8),
             selectedProfile: inspireProfileState.selectedRecommendation || null,
-            availableGameTemplates: getAvailableGameTemplatesForAI().filter(template => template && template.published !== false && template.compileReady === true),
+            availableGameTemplates: [],
             aiStages: {
                 analysisModel: analysisState.analysisModelMeta || null,
                 gamePlanModel: analysisState.finalModelMeta || null
@@ -5548,6 +5541,26 @@ Treat genre conventions as suggested, not confirmed, unless the user explicitly 
         scrollChatMessageIntoReadableView(targetMessage, options.mode || 'start');
     }
 
+    function scrollGenerationProgressIntoView(options = {}) {
+        if (!chatHistory) return;
+        const target = progressContainer && progressContainer.isConnected
+            ? progressContainer
+            : chatHistory.querySelector('#progressContainer');
+        if (!target) return;
+        const offset = Number.isFinite(options.offset) ? options.offset : 28;
+        requestAnimationFrame(() => {
+            requestAnimationFrame(() => {
+                const historyRect = chatHistory.getBoundingClientRect();
+                const targetRect = target.getBoundingClientRect();
+                const remainingSpace = Math.max(0, chatHistory.clientHeight - targetRect.height);
+                const desiredTop = Math.max(offset, Math.min(remainingSpace * 0.38, 140));
+                const nextTop = chatHistory.scrollTop + (targetRect.top - historyRect.top) - desiredTop;
+                const maxScroll = Math.max(0, chatHistory.scrollHeight - chatHistory.clientHeight);
+                chatHistory.scrollTop = Math.max(0, Math.min(nextTop, maxScroll));
+            });
+        });
+    }
+
     function setupAiPlanSummaryDisclosure(message) {
         if (!message) return;
         const summary = message.querySelector('.ai-plan-summary');
@@ -5782,7 +5795,11 @@ Treat genre conventions as suggested, not confirmed, unless the user explicitly 
         const api = getWorkfeedApi();
         if (!handle || !handle.card || !api || typeof api.updateWorkfeedCard !== 'function') return handle;
         api.updateWorkfeedCard(handle.card, handle.job);
-        if (chatHistory) chatHistory.scrollTop = chatHistory.scrollHeight;
+        if (chatHistory) {
+            const progressVisible = progressContainer && progressContainer.style.display !== 'none' && progressContainer.parentElement === chatHistory;
+            if (progressVisible) scrollGenerationProgressIntoView();
+            else chatHistory.scrollTop = chatHistory.scrollHeight;
+        }
         return handle;
     }
 
@@ -9146,6 +9163,15 @@ Lock Game Type to "Bullet Hell / Flying Shooter" and genre to "bullet-hell".`
     async function TemplateAssistedGenerator(plan, spec = getCurrentGameSpec(), progress = null) {
         if (!plan || !plan.decision || !plan.decision.canAutoGenerate) return plan;
         if (plan.generatedProject) return plan;
+        plan.generationMode = 'ai_direct';
+        plan.decision = {
+            ...plan.decision,
+            templateId: 'ai_direct',
+            templateLabel: 'AI direct',
+            generationMode: 'ai_direct',
+            candidates: []
+        };
+        return ensureAIDirectProject(plan, spec, progress);
         const templateId = plan.decision.templateId || '';
         if (!templateId || templateId === 'ai_direct' || !isCompileReadyRuntimeTemplate(templateId)) {
             plan.generationMode = 'ai_direct';
@@ -9418,13 +9444,14 @@ Lock Game Type to "Bullet Hell / Flying Shooter" and genre to "bullet-hell".`
     async function generateProjectByMode(plan, spec = getCurrentGameSpec(), progress = null) {
         if (!plan || !plan.decision || !plan.decision.canAutoGenerate) return plan;
         if (plan.generatedProject) return plan;
-        const requestedMode = plan.generationMode || plan.decision.generationMode || 'ai_direct';
-        if (requestedMode === 'template_assisted') {
-            const availabilityError = getTemplateAvailabilityError(plan.decision);
-            if (!availabilityError) return TemplateAssistedGenerator(plan, spec, progress);
-            addExecutionEvent('Template unavailable - using AI direct', 'warning', availabilityError);
-        }
         plan.generationMode = 'ai_direct';
+        plan.decision = {
+            ...plan.decision,
+            templateId: 'ai_direct',
+            templateLabel: 'AI direct',
+            generationMode: 'ai_direct',
+            candidates: []
+        };
         return ensureAIDirectProject(plan, spec, progress);
     }
 
@@ -16254,7 +16281,6 @@ Generation Mode: AI direct
 HTML5 Constraints: Canvas, playable, responsive, no external dependencies, single-file first`;
 
         regTimeout(() => {
-            scrollToAiPlanSummary({ mode: 'start' });
             chatHistory.classList.add('is-generating');
 
             // UI Transition: hide chat input
@@ -16271,9 +16297,8 @@ HTML5 Constraints: Canvas, playable, responsive, no external dependencies, singl
             }
             chatHistory.appendChild(progressContainer);
 
-            // Keep the user anchored on the AI-generated plan instead of jumping to the bottom.
             regTimeout(() => {
-                scrollToAiPlanSummary({ mode: 'start' });
+                scrollGenerationProgressIntoView();
             }, 100);
 
             (async () => {
@@ -16282,6 +16307,7 @@ HTML5 Constraints: Canvas, playable, responsive, no external dependencies, singl
                     const generationPlan = buildGenerationPlan(spec, latestGamePlan);
                     latestGenerationPlan = generationPlan;
                     runGenerationAnimation(generationPlan);
+                    regTimeout(() => scrollGenerationProgressIntoView(), 180);
                 } catch (error) {
                     const classified = classifyAIFlowError(error, 'Generation setup');
                     if (progressContainer) progressContainer.style.display = 'none';
@@ -17294,7 +17320,7 @@ HTML5 Constraints: Canvas, playable, responsive, no external dependencies, singl
     function buildAIDirectProgressMessage() {
         const activeModel = getActiveModelMeta();
         const label = activeModel && (activeModel.modelLabel || activeModel.label || activeModel.modelId);
-        return `Generating gameplay patch${label ? ` with ${label}` : ''}...`;
+        return `Generating a complete playable HTML5 game${label ? ` with ${label}` : ''}...`;
     }
 
     function createGenerationProgressController() {
@@ -17449,6 +17475,7 @@ HTML5 Constraints: Canvas, playable, responsive, no external dependencies, singl
                     if (inputArea) inputArea.style.display = '';
                 }
             });
+            scrollGenerationProgressIntoView();
             progress.workfeedHandle = activeGenerationWorkfeed;
             progress.cancelToken = cancelToken;
             advanceChatWorkfeed(activeGenerationWorkfeed, 'request', { summary: 'GameSpec confirmed.' });
