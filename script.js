@@ -2708,6 +2708,7 @@ document.addEventListener('DOMContentLoaded', () => {
     let activeGameCleanups = [];
     let latestGamePlanDraft = '';
     let latestGamePlan = null;
+    let latestGamePlanSummaryMessage = null;
     let latestGenerationPlan = null;
     let latestAIFlowError = null;
     let chatTranscript = [];
@@ -3193,6 +3194,7 @@ document.addEventListener('DOMContentLoaded', () => {
         clearAIRecommendationSnapshot();
         latestGamePlan = null;
         latestGamePlanDraft = '';
+        latestGamePlanSummaryMessage = null;
     }
 
     function startGuidedGameSpecWizard(options = {}) {
@@ -3345,6 +3347,14 @@ document.addEventListener('DOMContentLoaded', () => {
         resetExecutionTimeline();
         pendingAnalysisInstructions = [];
         queuedGenerationInstructions = [];
+        chatSelections = createEmptySelections();
+        chatShown = createChatTracking(() => new Set());
+        chatCurrent = createChatTracking(() => []);
+        savedPrompt = redactSensitiveText(prompt || '');
+        latestGamePlan = null;
+        latestGamePlanDraft = '';
+        latestGamePlanSummaryMessage = null;
+        latestGenerationPlan = null;
 
         analysisState.active = true;
         analysisState.processing = true;
@@ -5507,12 +5517,13 @@ Treat genre conventions as suggested, not confirmed, unless the user explicitly 
 
     function scrollChatMessageIntoReadableView(message, mode = 'auto') {
         if (!chatHistory || !message) return;
+        if (mode === 'none') return;
         requestAnimationFrame(() => {
             requestAnimationFrame(() => {
                 const historyRect = chatHistory.getBoundingClientRect();
                 const messageRect = message.getBoundingClientRect();
                 const hasGeneratedSurface = Boolean(message.querySelector(
-                    '.inspire-recommendation-list, .generation-result, .ai-work-card, .game-plan-summary, .summary-grid'
+                    '.inspire-recommendation-list, .generation-result, .ai-work-card, .game-plan-summary, .ai-plan-summary, .summary-grid'
                 ));
                 const shouldAnchorStart = mode === 'start' ||
                     hasGeneratedSurface ||
@@ -5528,11 +5539,54 @@ Treat genre conventions as suggested, not confirmed, unless the user explicitly 
         });
     }
 
+    function scrollToAiPlanSummary(options = {}) {
+        if (!chatHistory) return;
+        const targetMessage = latestGamePlanSummaryMessage && latestGamePlanSummaryMessage.isConnected
+            ? latestGamePlanSummaryMessage
+            : chatHistory.querySelector('.chat-message.ai-plan-summary-message:last-of-type');
+        if (!targetMessage) return;
+        scrollChatMessageIntoReadableView(targetMessage, options.mode || 'start');
+    }
+
+    function setupAiPlanSummaryDisclosure(message) {
+        if (!message) return;
+        const summary = message.querySelector('.ai-plan-summary');
+        if (!summary || summary.dataset.disclosureReady === '1') return;
+
+        summary.dataset.disclosureReady = '1';
+        requestAnimationFrame(() => {
+            const baseHeight = chatHistory ? chatHistory.clientHeight : window.innerHeight;
+            const maxCollapsedHeight = Math.max(280, Math.min(520, Math.round(baseHeight * 0.56)));
+            if (summary.scrollHeight <= maxCollapsedHeight + 36) return;
+
+            summary.style.setProperty('--ai-plan-collapsed-height', `${maxCollapsedHeight}px`);
+            summary.classList.add('is-collapsed');
+
+            const button = document.createElement('button');
+            button.type = 'button';
+            button.className = 'ai-plan-show-more';
+            button.textContent = 'Show more';
+            button.setAttribute('aria-expanded', 'false');
+            button.addEventListener('click', () => {
+                const expanded = summary.classList.toggle('is-expanded');
+                summary.classList.toggle('is-collapsed', !expanded);
+                button.textContent = expanded ? 'Show less' : 'Show more';
+                button.setAttribute('aria-expanded', expanded ? 'true' : 'false');
+                scrollToAiPlanSummary({ mode: 'start' });
+            });
+
+            summary.insertAdjacentElement('afterend', button);
+        });
+    }
+
     function addBotMessage(text, onRendered, options = {}) {
         cleanupChatModelBadges();
         const isPending = Boolean(options.pending);
         const msgDiv = document.createElement('div');
         msgDiv.className = 'chat-message bot';
+        if (options.messageClass) {
+            msgDiv.classList.add(...String(options.messageClass).split(/\s+/).filter(Boolean));
+        }
         msgDiv.innerHTML = `
             <div class="chat-content-wrap">
                 <div class="chat-bubble ${isPending ? 'ai-work-bubble' : 'typing-indicator'}">
@@ -5550,6 +5604,11 @@ Treat genre conventions as suggested, not confirmed, unless the user explicitly 
                 bubble.className = 'chat-bubble';
                 bubble.innerHTML = finalText;
                 recordChatTurn('assistant', finalText, { pending: isPending });
+                if (options.summaryAnchor) {
+                    latestGamePlanSummaryMessage = msgDiv;
+                    msgDiv.classList.add('ai-plan-summary-message');
+                    setupAiPlanSummaryDisclosure(msgDiv);
+                }
                 if (typeof onRendered === 'function') {
                     onRendered(msgDiv);
                 }
@@ -7479,13 +7538,20 @@ Lock Game Type to "Bullet Hell / Flying Shooter" and genre to "bullet-hell".`
             });
             return;
         }
-        const pendingMessage = addBotMessage('', null, { pending: true, workType: 'shaping' });
+        const pendingMessage = addBotMessage('', null, {
+            pending: true,
+            workType: 'shaping',
+            scrollMode: 'start',
+            summaryAnchor: true,
+            messageClass: 'ai-plan-summary-message'
+        });
         const summaryHtml = await buildGamePlanSummaryHtml();
         if (pendingMessage) pendingMessage.finish(summaryHtml);
         regTimeout(() => {
             addBotMessage(t('ready'), () => {
                 regTimeout(renderFinalActionButtons, 160);
-            });
+                regTimeout(() => scrollToAiPlanSummary({ mode: 'start' }), 220);
+            }, { scrollMode: 'none' });
         }, 500);
     }
 
@@ -7713,6 +7779,8 @@ Lock Game Type to "Bullet Hell / Flying Shooter" and genre to "bullet-hell".`
 
     function compactGameSpecForGeneration(spec = getCurrentGameSpec()) {
         return {
+            title: compactModelText(spec.title || spec.name || '', 120),
+            name: compactModelText(spec.name || spec.title || '', 120),
             gameType: compactModelText(spec.gameType, 160),
             artStyle: compactModelText(spec.artStyle, 160),
             gameSetting: compactModelText(spec.gameSetting, 180),
@@ -7731,6 +7799,7 @@ Lock Game Type to "Bullet Hell / Flying Shooter" and genre to "bullet-hell".`
     }
 
     function compactProductionPlanForGeneration(plan = latestGamePlan, spec = getCurrentGameSpec()) {
+        if (!plan) return null;
         const normalized = normalizeGamePlanForGeneration(plan, spec);
         return {
             title: compactModelText(normalized.title, 120),
@@ -7745,7 +7814,9 @@ Lock Game Type to "Bullet Hell / Flying Shooter" and genre to "bullet-hell".`
     }
 
     function buildCompactProductionBriefText(plan = latestGamePlan, spec = getCurrentGameSpec()) {
+        if (!plan) return '';
         const compact = compactProductionPlanForGeneration(plan, spec);
+        if (!compact) return '';
         return [
             `Title: ${compact.title}`,
             `Playable loop: ${compact.coreLoop}`,
@@ -7768,6 +7839,8 @@ Lock Game Type to "Bullet Hell / Flying Shooter" and genre to "bullet-hell".`
         const uniqueBackground = [...new Set(backgroundParts)];
         return {
             ...spec,
+            title: normalized.title || spec.title || spec.name || '',
+            name: normalized.title || spec.name || spec.title || '',
             gameSetting: spec.gameSetting || normalized.title,
             background: uniqueBackground.join('\n'),
             coreGameplay: normalized.coreLoop || spec.coreGameplay,
@@ -8185,7 +8258,7 @@ Lock Game Type to "Bullet Hell / Flying Shooter" and genre to "bullet-hell".`
 
         return {
             meta: {
-                gameName: productPlan ? productPlan.gameName : `${spec.gameSetting || 'Custom'} ${template.label}`,
+                gameName: firstText(spec.title, spec.name, productPlan && productPlan.gameName, `${spec.gameSetting || 'Custom'} ${template.label}`),
                 gameType: productPlan ? 'bullet-hell' : template.type,
                 version: 'p0-preview',
                 description: productPlan ? productPlan.meta.description : (spec.background || 'Generated from one natural-language prompt.'),
@@ -8843,8 +8916,14 @@ Lock Game Type to "Bullet Hell / Flying Shooter" and genre to "bullet-hell".`
     async function generateAIDirectGameProject(spec, productionPlan = null, productionBrief = '') {
         const activeModel = requireActiveAIModel('AI direct game generation');
         const prompt = savedPrompt || spec.background || '';
-        const requestSpec = compactGameSpecForGeneration(spec);
-        const requestPlan = compactProductionPlanForGeneration(productionPlan, requestSpec);
+        const compactSpec = compactGameSpecForGeneration(spec);
+        const requestPlan = compactProductionPlanForGeneration(productionPlan, compactSpec);
+        const planTitle = requestPlan && requestPlan.title ? requestPlan.title : '';
+        const requestSpec = {
+            ...compactSpec,
+            title: compactModelText(planTitle || compactSpec.title || compactSpec.gameSetting || compactSpec.gameType || 'AI Direct Game', 120),
+            name: compactModelText(planTitle || compactSpec.name || compactSpec.gameSetting || compactSpec.gameType || 'AI Direct Game', 120)
+        };
         const requestBrief = buildCompactProductionBriefText(requestPlan, requestSpec);
         const callEventId = addExecutionEvent(
             `Calling ${activeModel.label || getModelLabel(activeModel.providerId, activeModel.modelId)}`,
@@ -9479,7 +9558,7 @@ Lock Game Type to "Bullet Hell / Flying Shooter" and genre to "bullet-hell".`
         list.appendChild(newIdeaBtn);
 
         chatHistory.appendChild(container);
-        chatHistory.scrollTop = chatHistory.scrollHeight;
+        scrollToAiPlanSummary({ mode: 'start' });
 
         const params = new URLSearchParams(window.location.search);
         if (params.get('autorun') === '1' && params.get('testPrompt') && !window.__e2eFinalActionAutoConfirmed) {
@@ -9851,6 +9930,7 @@ Lock Game Type to "Bullet Hell / Flying Shooter" and genre to "bullet-hell".`
     const WORKSPACE_INDEXED_DB_VERSION = 1;
     const WORKSPACE_STORE = 'workspaces';
     const WORKSPACE_CURRENT_STORE = 'current';
+    const WORKSPACE_ACTIVE_HINT_KEY = 'gamia_active_workspace_hint';
     const WORKSPACE_SNAPSHOT_DEBOUNCE_MS = 700;
     const WORKSPACE_RESTORE_MAX_AGE_MS = 6 * 60 * 60 * 1000;
     let workspaceDbPromise = null;
@@ -9913,11 +9993,29 @@ Lock Game Type to "Bullet Hell / Flying Shooter" and genre to "bullet-hell".`
     }
 
     async function clearActiveWorkspacePointer() {
+        try {
+            localStorage.removeItem(WORKSPACE_ACTIVE_HINT_KEY);
+        } catch (error) {
+            // Local workspace restore hint is best effort only.
+        }
         await workspaceDbPut(WORKSPACE_CURRENT_STORE, {
             key: 'activeWorkspaceId',
             workspaceId: '',
             updatedAt: new Date().toISOString()
         });
+    }
+
+    function writeActiveWorkspaceHint(snapshot) {
+        if (!snapshot || !snapshot.workspaceId) return;
+        try {
+            localStorage.setItem(WORKSPACE_ACTIVE_HINT_KEY, JSON.stringify({
+                workspaceId: snapshot.workspaceId,
+                projectId: snapshot.projectId || '',
+                updatedAt: snapshot.updatedAt || new Date().toISOString()
+            }));
+        } catch (error) {
+            // IndexedDB remains the source of truth if localStorage is unavailable.
+        }
     }
 
     function safeWorkspaceIdSegment(value = 'workspace') {
@@ -10145,6 +10243,7 @@ Lock Game Type to "Bullet Hell / Flying Shooter" and genre to "bullet-hell".`
                 workspaceId: snapshot.workspaceId,
                 updatedAt: snapshot.updatedAt
             });
+            writeActiveWorkspaceHint(snapshot);
         }
         return ok;
     }
@@ -10156,6 +10255,7 @@ Lock Game Type to "Bullet Hell / Flying Shooter" and genre to "bullet-hell".`
         const ok = await workspaceDbPut(WORKSPACE_STORE, snapshot);
         if (ok) {
             await workspaceDbPut(WORKSPACE_CURRENT_STORE, { key: 'activeWorkspaceId', workspaceId: snapshot.workspaceId, updatedAt: snapshot.updatedAt });
+            writeActiveWorkspaceHint(snapshot);
         }
         return ok;
     }
@@ -16154,12 +16254,7 @@ Generation Mode: AI direct
 HTML5 Constraints: Canvas, playable, responsive, no external dependencies, single-file first`;
 
         regTimeout(() => {
-            // Focus on the final summary by scrolling it to the top
-            const messages = chatHistory.querySelectorAll('.chat-message');
-            const summaryMessage = messages[messages.length - 1];
-            if (summaryMessage) {
-                summaryMessage.scrollIntoView({ behavior: 'smooth', block: 'start' });
-            }
+            scrollToAiPlanSummary({ mode: 'start' });
             chatHistory.classList.add('is-generating');
 
             // UI Transition: hide chat input
@@ -16176,9 +16271,9 @@ HTML5 Constraints: Canvas, playable, responsive, no external dependencies, singl
             }
             chatHistory.appendChild(progressContainer);
 
-            // Ensure scroll to see the progress bar
+            // Keep the user anchored on the AI-generated plan instead of jumping to the bottom.
             regTimeout(() => {
-                chatHistory.scrollTop = chatHistory.scrollHeight;
+                scrollToAiPlanSummary({ mode: 'start' });
             }, 100);
 
             (async () => {
@@ -16314,7 +16409,7 @@ HTML5 Constraints: Canvas, playable, responsive, no external dependencies, singl
                 regTimeout(() => {
                     addUserMessage(t('inspire'));
                     regTimeout(() => {
-                        startGuidedGameSpecWizard();
+                        renderInspireModeChoice(1);
                     }, 800);
                 }, 350);
             });
@@ -16575,6 +16670,17 @@ HTML5 Constraints: Canvas, playable, responsive, no external dependencies, singl
 
     async function beginPromptGenerationFromHome(prompt) {
         const safePrompt = redactSensitiveText(prompt);
+        resetBulletHellPlanState();
+        resetExecutionTimeline();
+        chatSelections = createEmptySelections();
+        chatShown = createChatTracking(() => new Set());
+        chatCurrent = createChatTracking(() => []);
+        latestGamePlan = null;
+        latestGamePlanDraft = '';
+        latestGamePlanSummaryMessage = null;
+        latestGenerationPlan = null;
+        analysisState.intentSummary = null;
+        savedPrompt = safePrompt;
         openChatView();
         setChatLanguageFromText(safePrompt);
         addUserMessage(safePrompt);
